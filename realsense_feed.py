@@ -137,6 +137,10 @@ align = rs.align(align_to)
 cv2.namedWindow('Live Feed')
 cv2.setMouseCallback('Live Feed', mouse_callback)
 
+print("Controls:")
+print("- Click on image to move robot to that point")
+print("- Press 'q' to quit")
+
 try:
     while True:
         # Wait for frames

@@ -89,8 +89,13 @@ extern "C" __declspec(dllexport) int move_robot_to_offset(float offset_x, float 
             {-sp,     cp * sr,               cp * cr}
         };
         
+        // Subtract 50mm from Z coordinate to position robot 5cm closer to camera
+        float adjusted_offset_z = offset_z - 50.0f;
+        
+        cout << "Original Z: " << offset_z << "mm, Adjusted Z (5cm closer): " << adjusted_offset_z << "mm" << endl;
+        
         // Offset vector in tool frame
-        double offset_tool[3] = {offset_x, offset_y, offset_z};
+        double offset_tool[3] = {offset_x, offset_y, adjusted_offset_z};
         
         // Compute offset in base frame: R * offset_tool
         double offset_base[3] = {0.0, 0.0, 0.0};
