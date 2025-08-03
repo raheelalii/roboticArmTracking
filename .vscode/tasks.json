@@ -1,0 +1,84 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "Build test_move.cpp with MSVC",
+            "command": "${workspaceFolder}/build_test_move.bat",
+            "args": [],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": ["$msCompile"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "detail": "Build test_move.cpp using Visual Studio Build Tools via batch file"
+        },
+        {
+            "type": "shell",
+            "label": "Build with MinGW (Alternative)",
+            "command": "g++",
+            "args": [
+                "-std=c++17",
+                "-I${workspaceFolder}/frcobot_cpp_sdk/windows/x86_vs2022/include",
+                "-L${workspaceFolder}/frcobot_cpp_sdk/windows/x86_vs2022/lib86/Release",
+                "${workspaceFolder}/test_move.cpp",
+                "-o",
+                "${workspaceFolder}/test_move.exe",
+                "-Wl,--enable-stdcall-fixup",
+                "-static-libgcc",
+                "-static-libstdc++"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": ["$gcc"],
+            "group": "build",
+            "detail": "Alternative build using MinGW g++"
+        },
+        {
+            "type": "shell",
+            "label": "Copy DLL to workspace",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "copy \"${workspaceFolder}\\frcobot_cpp_sdk\\windows\\x86_vs2022\\lib86\\Release\\cobotAPI.dll\" \"${workspaceFolder}\\\""
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "detail": "Copy cobotAPI.dll to workspace root"
+        },
+        {
+            "type": "shell",
+            "label": "Run test_move.exe",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "\"${workspaceFolder}\\test_move.exe\""
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "detail": "Run the compiled test_move.exe program"
+        },
+        {
+            "type": "shell",
+            "label": "Build and Run test_move",
+            "command": "cmd",
+            "args": [
+                "/c",
+                "\"${workspaceFolder}\\build_test_move.bat\""
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "detail": "Build and run the test_move program using batch file"
+        }
+    ]
+}
