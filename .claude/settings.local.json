@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp:*)",
+      "Bash(copy:*)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(build_updated_dll.bat)",
+      "Bash(cmd.exe:*)",
+      "Bash(cl:*)",
+      "Bash(powershell:*)"
+    ],
+    "deny": []
+  }
+}

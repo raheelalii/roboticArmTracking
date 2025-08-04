@@ -3,3 +3,4 @@ opencv-python
 numpy
 requests
 pyrealsense2
+ultralytics
