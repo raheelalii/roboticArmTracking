@@ -11,7 +11,8 @@ import time
 from datetime import datetime
 
 # Configuration variables
-TARGET_LABEL = "bottle"  # Object to track (e.g., "bottle", "person", "cup")
+TARGET_LABEL = "bottle"  # Primary object to track
+SECOND_TARGET_LABEL = "scissors"  # Secondary target to move the first object to
 ENABLE_TRACKING = True   # Enable/disable real-time tracking
 CONFIDENCE_THRESHOLD = 0.4  # Minimum confidence for detection
 TRACKING_INTERVAL = 0.5  # Seconds between tracking updates
@@ -28,6 +29,7 @@ yolo_model = None
 tracking_thread = None
 tracking_enabled = False
 last_tracked_position = None
+last_scissors_position = None
 tracking_lock = threading.Lock()
 pipeline = None  # RealSense pipeline
 
@@ -69,13 +71,18 @@ def initialize_robot_control():
         print(f"✗ Failed to load C++ robot control: {e}")
         print("Running in camera-only mode")
 
-def move_robot_to_point(x_mm, y_mm, z_mm):
-    """Move robot using C++ DLL function"""
+def move_robot_to_point(x_mm, y_mm, z_mm, compensate_approach: bool = True):
+    """Move robot using C++ DLL function.
+    compensate_approach: if True, add +50 mm on Z to counter a built-in 50 mm approach offset in the bridge,
+    so the effective motion reaches the exact camera-read Z.
+    """
     if not robot_initialized or robot_dll is None:
         print("Robot control not available - C++ DLL not loaded or robot not initialized")
         return False
     
     try:
+        if compensate_approach:
+            z_mm = z_mm + 50.0
         print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Moving robot to offset: ({x_mm:.2f}, {y_mm:.2f}, {z_mm:.2f}) mm")
         
         # Call the C++ function to move robot by offset
@@ -116,7 +123,7 @@ def initialize_yolo():
         print("\nAvailable object classes:")
         for idx, name in yolo_model.names.items():
             print(f"  {idx}: {name}")
-        print(f"\nTarget object set to: '{TARGET_LABEL}'")
+        print(f"\nPrimary target set to: '{TARGET_LABEL}', secondary target: '{SECOND_TARGET_LABEL}'")
         
     except Exception as e:
         print(f"✗ Failed to load YOLO model: {e}")
@@ -133,98 +140,79 @@ def initialize_yolo():
             print(f"✗ Failed to download fresh model: {e2}")
             yolo_model = None
 
-def detect_target_object(color_image, depth_frame, intrinsics):
-    """Detect the target object and return its 3D position"""
+def _deproject_center(depth_frame, intrinsics, cx, cy):
+    depth = depth_frame.get_distance(cx, cy)
+    if not (MIN_DEPTH_THRESHOLD < depth < MAX_DEPTH_THRESHOLD):
+        return None
+    pt = rs.rs2_deproject_pixel_to_point(intrinsics, [cx, cy], depth)
+    return (pt[0] * 1000.0, pt[1] * 1000.0, pt[2] * 1000.0)  # mm
+
+def detect_bottle_and_scissors(color_image, depth_frame, intrinsics):
+    """Detect best 'bottle' and 'scissors' in a single YOLO pass.
+    Returns (bottle_detection, scissors_detection, annotated_image)
+    Detection dict: {position: (x_mm,y_mm,z_mm), confidence: float, bbox: (x1,y1,x2,y2), center: (u,v)}
+    """
     if yolo_model is None:
-        return None, color_image
-    
+        return None, None, color_image
     try:
-        # Run YOLO detection
         results = yolo_model(color_image, verbose=False)
-    except Exception as e:
-        # Return original image if detection fails
-        return None, color_image
-    
-    target_detection = None
-    annotated_image = color_image.copy()
-    
-    # Process detections
+    except Exception:
+        return None, None, color_image
+
+    best_bottle = None
+    best_scissors = None
+    annotated = color_image.copy()
+
     for result in results:
         boxes = result.boxes
-        if boxes is not None:
-            for box in boxes:
-                # Get class ID and confidence
-                class_id = int(box.cls[0])
-                confidence = float(box.conf[0])
-                class_name = yolo_model.names[class_id]
-                
-                # Get bounding box coordinates
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                
-                # Calculate center
-                center_x = (x1 + x2) // 2
-                center_y = (y1 + y2) // 2
-                
-                # Check if this is our target object
-                if class_name == TARGET_LABEL and confidence > CONFIDENCE_THRESHOLD:
-                    # Get depth at center point
-                    depth = depth_frame.get_distance(center_x, center_y)
-                    
-                    # Validate depth
-                    if MIN_DEPTH_THRESHOLD < depth < MAX_DEPTH_THRESHOLD:
-                        # Deproject to 3D coordinates
-                        depth_point = rs.rs2_deproject_pixel_to_point(intrinsics, [center_x, center_y], depth)
-                        
-                        # Convert to millimeters
-                        obj_x = depth_point[0] * 1000
-                        obj_y = depth_point[1] * 1000
-                        obj_z = depth_point[2] * 1000
-                        
-                        # Update target detection if this has higher confidence
-                        if target_detection is None or confidence > target_detection['confidence']:
-                            target_detection = {
-                                'position': (obj_x, obj_y, obj_z),
-                                'confidence': confidence,
-                                'bbox': (x1, y1, x2, y2),
-                                'center': (center_x, center_y)
-                            }
-                    
-                    # Draw target object in green
-                    color = (0, 255, 0)
-                else:
-                    # Draw other objects in gray
-                    color = (128, 128, 128)
-                
-                # Draw bounding box
-                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), color, 2)
-                
-                # Draw label
-                label = f"{class_name}: {confidence:.2f}"
-                cv2.putText(annotated_image, label, (x1, y1 - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-    
-    # Highlight target object if found
-    if target_detection:
-        x1, y1, x2, y2 = target_detection['bbox']
-        center_x, center_y = target_detection['center']
-        
-        # Draw thick border
-        cv2.rectangle(annotated_image, (x1-2, y1-2), (x2+2, y2+2), (0, 255, 0), 3)
-        
-        # Draw crosshair at center
-        cv2.circle(annotated_image, (center_x, center_y), 8, (0, 0, 255), -1)
-        cv2.circle(annotated_image, (center_x, center_y), 12, (255, 255, 255), 2)
-        cv2.line(annotated_image, (center_x - 15, center_y), (center_x + 15, center_y), (255, 255, 255), 2)
-        cv2.line(annotated_image, (center_x, center_y - 15), (center_x, center_y + 15), (255, 255, 255), 2)
-        
-        # Display coordinates
-        pos = target_detection['position']
-        coord_text = f"Target: ({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f})mm"
-        cv2.putText(annotated_image, coord_text, (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-    
-    return target_detection, annotated_image
+        if boxes is None:
+            continue
+        for box in boxes:
+            class_id = int(box.cls[0])
+            conf = float(box.conf[0])
+            if conf < CONFIDENCE_THRESHOLD:
+                continue
+            class_name = yolo_model.names[class_id]
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+
+            pos_mm = _deproject_center(depth_frame, intrinsics, cx, cy)
+            if pos_mm is None:
+                color = (128, 128, 128)
+            else:
+                color = (0, 255, 0) if class_name == TARGET_LABEL else ((255, 0, 255) if class_name == SECOND_TARGET_LABEL else (128, 128, 128))
+
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(annotated, f"{class_name}: {conf:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+            if class_name == TARGET_LABEL and pos_mm is not None:
+                det = {
+                    'position': pos_mm,
+                    'confidence': conf,
+                    'bbox': (x1, y1, x2, y2),
+                    'center': (cx, cy)
+                }
+                if best_bottle is None or conf > best_bottle['confidence']:
+                    best_bottle = det
+            elif class_name == SECOND_TARGET_LABEL and pos_mm is not None:
+                det = {
+                    'position': pos_mm,
+                    'confidence': conf,
+                    'bbox': (x1, y1, x2, y2),
+                    'center': (cx, cy)
+                }
+                if best_scissors is None or conf > best_scissors['confidence']:
+                    best_scissors = det
+
+    # Emphasize centers
+    for det, col in [(best_bottle, (0, 255, 0)), (best_scissors, (255, 0, 255))]:
+        if det:
+            u, v = det['center']
+            cv2.circle(annotated, (u, v), 6, col, -1)
+
+    return best_bottle, best_scissors, annotated
 
 def tracking_loop():
     """Background thread for continuous object tracking"""
@@ -400,6 +388,19 @@ if ENABLE_TRACKING and robot_initialized:
     print(f"Auto-starting tracking for '{TARGET_LABEL}'...")
     toggle_tracking()
 
+print("- Press 'M' to move primary target to secondary target (bottle -> scissors)")
+print("- Click on image to manually move robot to that point")
+print("- Press 'Q' to quit")
+print("- Press 'S' to print tracking status")
+print("\nStarting camera feed...\n")
+
+# Automatically start tracking if enabled
+if ENABLE_TRACKING and robot_initialized:
+    # Small delay to ensure everything is initialized
+    time.sleep(1.0)
+    print(f"Auto-starting tracking for '{TARGET_LABEL}'...")
+    toggle_tracking()
+
 # Main loop
 try:
     while True:
@@ -422,13 +423,25 @@ try:
         # Convert color frame to numpy array
         color_image = np.asanyarray(color_frame.get_data())
 
-        # Perform object detection and annotation
-        detection, annotated_image = detect_target_object(color_image, depth_frame, intrinsics_global)
+        # Perform object detection and annotation (both targets)
+        bottle_det, scissors_det, annotated_image = detect_bottle_and_scissors(color_image, depth_frame, intrinsics_global)
 
         # Add status overlay
-        status_text = f"Tracking: {'ON' if tracking_enabled else 'OFF'} | Target: {TARGET_LABEL}"
+        status_text = f"Tracking: {'ON' if tracking_enabled else 'OFF'} | Target: {TARGET_LABEL} | Second: {SECOND_TARGET_LABEL}"
         cv2.putText(annotated_image, status_text, (10, annotated_image.shape[0] - 10), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+
+        # Show coordinates on screen
+        y_text = 30
+        if bottle_det:
+            bx, by, bz = bottle_det['position']
+            cv2.putText(annotated_image, f"Bottle: ({bx:.0f},{by:.0f},{bz:.0f}) mm", (10, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+            y_text += 25
+        if scissors_det:
+            sx, sy, sz = scissors_det['position']
+            last_scissors_position = scissors_det['position']
+            cv2.putText(annotated_image, f"Scissors: ({sx:.0f},{sy:.0f},{sz:.0f}) mm", (10, y_text), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,255), 2)
+            y_text += 25
 
         # Display the annotated image
         cv2.imshow('RealSense Object Tracking', annotated_image)
@@ -442,9 +455,62 @@ try:
         elif key == ord('s') or key == ord('S'):
             print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Status:")
             print(f"  - Tracking: {'ENABLED' if tracking_enabled else 'DISABLED'}")
-            print(f"  - Target: {TARGET_LABEL}")
-            print(f"  - Last position: {last_tracked_position}")
+            print(f"  - Primary target: {TARGET_LABEL}")
+            print(f"  - Secondary target: {SECOND_TARGET_LABEL}")
+            print(f"  - Last bottle position: {last_tracked_position}")
+            print(f"  - Last scissors position: {last_scissors_position}")
             print()
+        elif key == ord('m') or key == ord('M'):
+            # Move bottle -> return to original -> re-detect scissors -> move to scissors
+            if not robot_initialized:
+                print("[WARN] Robot not initialized.")
+                continue
+            if not bottle_det:
+                print("[WARN] Bottle not visible with valid depth.")
+                continue
+            bx, by, bz = bottle_det['position']
+            # Clamp absolute offset to prevent large jumps
+            def clamp(v, lim=350.0):
+                return max(-lim, min(lim, v))
+            cbx, cby, cbz = clamp(bx), clamp(by), clamp(bz)
+            print(f"[PLAN] Step1: go to bottle ({cbx:.1f},{cby:.1f},{cbz:.1f}) mm")
+            ok1 = move_robot_to_point(cbx, cby, cbz, compensate_approach=True)
+            if not ok1:
+                print("[RESULT] Move had errors on bottle approach.")
+                continue
+            time.sleep(0.5)
+            print(f"[PLAN] Step2: return to original by offset ({-cbx:.1f},{-cby:.1f},{-cbz:.1f}) mm")
+            ok2 = move_robot_to_point(-cbx, -cby, -cbz, compensate_approach=True)
+            if not ok2:
+                print("[RESULT] Return to original failed.")
+                continue
+            time.sleep(0.5)
+            # Step3: re-detect scissors from the original pose
+            print("[PLAN] Step3: searching for scissors from original pose...")
+            found_scissors = None
+            for _ in range(45):  # about ~1.5s at 30 FPS
+                frames2 = pipeline.wait_for_frames()
+                af2 = align.process(frames2)
+                df2 = af2.get_depth_frame()
+                cf2 = af2.get_color_frame()
+                if not df2 or not cf2:
+                    continue
+                with tracking_lock:
+                    intr2 = cf2.profile.as_video_stream_profile().intrinsics
+                ci2 = np.asanyarray(cf2.get_data())
+                _, sc_det2, _ = detect_bottle_and_scissors(ci2, df2, intr2)
+                if sc_det2:
+                    found_scissors = sc_det2['position']
+                    break
+                time.sleep(0.02)
+            if not found_scissors:
+                print("[WARN] Scissors not found after returning to original pose.")
+                continue
+            sx, sy, sz = found_scissors
+            csx, csy, csz = clamp(sx), clamp(sy), clamp(sz)
+            print(f"[PLAN] Step4: move to scissors ({csx:.1f},{csy:.1f},{csz:.1f}) mm")
+            ok3 = move_robot_to_point(csx, csy, csz, compensate_approach=True)
+            print("[RESULT] Move complete." if ok3 else "[RESULT] Move had errors on scissors approach.")
 
 finally:
     # Cleanup
